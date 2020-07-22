@@ -5,17 +5,13 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/micro/go-micro/client/selector"
-	"github.com/micro/go-micro/errors"
-	"github.com/micro/go-micro/registry"
-	"github.com/micro/go-micro/registry/memory"
+	"github.com/micro/go-micro/v2/errors"
+	"github.com/micro/go-micro/v2/registry"
+	"github.com/micro/go-micro/v2/registry/memory"
 )
 
 func newTestRegistry() registry.Registry {
-	r := memory.NewRegistry()
-	reg := r.(*memory.Registry)
-	reg.Services = testData
-	return reg
+	return memory.NewRegistry(memory.Services(testData))
 }
 
 func TestCallAddress(t *testing.T) {
@@ -50,7 +46,6 @@ func TestCallAddress(t *testing.T) {
 		Registry(r),
 		WrapCall(wrap),
 	)
-	c.Options().Selector.Init(selector.Registry(r))
 
 	req := c.NewRequest(service, endpoint, nil)
 
@@ -89,7 +84,6 @@ func TestCallRetry(t *testing.T) {
 		Registry(r),
 		WrapCall(wrap),
 	)
-	c.Options().Selector.Init(selector.Registry(r))
 
 	req := c.NewRequest(service, endpoint, nil)
 
@@ -137,7 +131,6 @@ func TestCallWrapper(t *testing.T) {
 		Registry(r),
 		WrapCall(wrap),
 	)
-	c.Options().Selector.Init(selector.Registry(r))
 
 	r.Register(&registry.Service{
 		Name:    service,
@@ -146,6 +139,9 @@ func TestCallWrapper(t *testing.T) {
 			{
 				Id:      id,
 				Address: address,
+				Metadata: map[string]string{
+					"protocol": "mucp",
+				},
 			},
 		},
 	})

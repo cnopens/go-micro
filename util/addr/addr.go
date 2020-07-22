@@ -17,6 +17,15 @@ func init() {
 	}
 }
 
+// AppendPrivateBlocks append private network blocks
+func AppendPrivateBlocks(bs ...string) {
+	for _, b := range bs {
+		if _, block, err := net.ParseCIDR(b); err == nil {
+			privateBlocks = append(privateBlocks, block)
+		}
+	}
+}
+
 func isPrivateIP(ipAddr string) bool {
 	ip := net.ParseIP(ipAddr)
 	for _, priv := range privateBlocks {
@@ -24,6 +33,29 @@ func isPrivateIP(ipAddr string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// IsLocal tells us whether an ip is local
+func IsLocal(addr string) bool {
+	// extract the host
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		addr = host
+	}
+
+	// check if its localhost
+	if addr == "localhost" {
+		return true
+	}
+
+	// check against all local ips
+	for _, ip := range IPs() {
+		if addr == ip {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -39,12 +71,13 @@ func Extract(addr string) (string, error) {
 		return "", fmt.Errorf("Failed to get interfaces! Err: %v", err)
 	}
 
+	//nolint:prealloc
 	var addrs []net.Addr
 	var loAddrs []net.Addr
 	for _, iface := range ifaces {
 		ifaceAddrs, err := iface.Addrs()
 		if err != nil {
-			// ignore error, interface can dissapear from system
+			// ignore error, interface can disappear from system
 			continue
 		}
 		if iface.Flags&net.FlagLoopback != 0 {
@@ -55,8 +88,8 @@ func Extract(addr string) (string, error) {
 	}
 	addrs = append(addrs, loAddrs...)
 
-	var ipAddr []byte
-	var publicIP []byte
+	var ipAddr string
+	var publicIP string
 
 	for _, rawAddr := range addrs {
 		var ip net.IP
@@ -70,22 +103,30 @@ func Extract(addr string) (string, error) {
 		}
 
 		if !isPrivateIP(ip.String()) {
-			publicIP = ip
+			publicIP = ip.String()
 			continue
 		}
 
-		ipAddr = ip
+		ipAddr = ip.String()
 		break
 	}
 
 	// return private ip
-	if ipAddr != nil {
-		return net.IP(ipAddr).String(), nil
+	if len(ipAddr) > 0 {
+		a := net.ParseIP(ipAddr)
+		if a == nil {
+			return "", fmt.Errorf("ip addr %s is invalid", ipAddr)
+		}
+		return a.String(), nil
 	}
 
 	// return public or virtual ip
-	if publicIP != nil {
-		return net.IP(publicIP).String(), nil
+	if len(publicIP) > 0 {
+		a := net.ParseIP(publicIP)
+		if a == nil {
+			return "", fmt.Errorf("ip addr %s is invalid", publicIP)
+		}
+		return a.String(), nil
 	}
 
 	return "", fmt.Errorf("No IP address found, and explicit IP not provided")

@@ -5,14 +5,16 @@ import (
 	"context"
 	"time"
 
-	"github.com/micro/go-micro/client"
-	"github.com/micro/go-micro/registry"
-	pb "github.com/micro/go-micro/registry/service/proto"
+	"github.com/micro/go-micro/v2/client"
+	"github.com/micro/go-micro/v2/client/grpc"
+	"github.com/micro/go-micro/v2/errors"
+	"github.com/micro/go-micro/v2/registry"
+	pb "github.com/micro/go-micro/v2/registry/service/proto"
 )
 
 var (
 	// The default service name
-	DefaultService = "go.micro.service"
+	DefaultService = "go.micro.registry"
 )
 
 type serviceRegistry struct {
@@ -45,6 +47,21 @@ func (s *serviceRegistry) Init(opts ...registry.Option) error {
 	for _, o := range opts {
 		o(&s.opts)
 	}
+
+	if len(s.opts.Addrs) > 0 {
+		s.address = s.opts.Addrs
+	}
+
+	// extract the client from the context, fallback to grpc
+	var cli client.Client
+	if c, ok := s.opts.Context.Value(clientKey{}).(client.Client); ok {
+		cli = c
+	} else {
+		cli = grpc.NewClient()
+	}
+
+	s.client = pb.NewRegistryService(DefaultService, cli)
+
 	return nil
 }
 
@@ -57,35 +74,54 @@ func (s *serviceRegistry) Register(srv *registry.Service, opts ...registry.Regis
 	for _, o := range opts {
 		o(&options)
 	}
+	if options.Context == nil {
+		options.Context = context.TODO()
+	}
 
-	// encode srv into protobuf and pack Register TTL into it
+	// encode srv into protobuf and pack TTL and domain into it
 	pbSrv := ToProto(srv)
 	pbSrv.Options.Ttl = int64(options.TTL.Seconds())
+	pbSrv.Options.Domain = options.Domain
 
 	// register the service
-	_, err := s.client.Register(context.TODO(), pbSrv, s.callOpts()...)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	_, err := s.client.Register(options.Context, pbSrv, s.callOpts()...)
+	return err
 }
 
-func (s *serviceRegistry) Deregister(srv *registry.Service) error {
+func (s *serviceRegistry) Deregister(srv *registry.Service, opts ...registry.DeregisterOption) error {
+	var options registry.DeregisterOptions
+	for _, o := range opts {
+		o(&options)
+	}
+	if options.Context == nil {
+		options.Context = context.TODO()
+	}
+
+	// encode srv into protobuf and pack domain into it
+	pbSrv := ToProto(srv)
+	pbSrv.Options.Domain = options.Domain
+
 	// deregister the service
-	_, err := s.client.Deregister(context.TODO(), ToProto(srv), s.callOpts()...)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err := s.client.Deregister(options.Context, pbSrv, s.callOpts()...)
+	return err
 }
 
-func (s *serviceRegistry) GetService(name string) ([]*registry.Service, error) {
-	rsp, err := s.client.GetService(context.TODO(), &pb.GetRequest{
-		Service: name,
+func (s *serviceRegistry) GetService(name string, opts ...registry.GetOption) ([]*registry.Service, error) {
+	var options registry.GetOptions
+	for _, o := range opts {
+		o(&options)
+	}
+	if options.Context == nil {
+		options.Context = context.TODO()
+	}
+
+	rsp, err := s.client.GetService(options.Context, &pb.GetRequest{
+		Service: name, Options: &pb.Options{Domain: options.Domain},
 	}, s.callOpts()...)
 
-	if err != nil {
+	if verr, ok := err.(*errors.Error); ok && verr.Code == 404 {
+		return nil, registry.ErrNotFound
+	} else if err != nil {
 		return nil, err
 	}
 
@@ -96,8 +132,17 @@ func (s *serviceRegistry) GetService(name string) ([]*registry.Service, error) {
 	return services, nil
 }
 
-func (s *serviceRegistry) ListServices() ([]*registry.Service, error) {
-	rsp, err := s.client.ListServices(context.TODO(), &pb.ListRequest{}, s.callOpts()...)
+func (s *serviceRegistry) ListServices(opts ...registry.ListOption) ([]*registry.Service, error) {
+	var options registry.ListOptions
+	for _, o := range opts {
+		o(&options)
+	}
+	if options.Context == nil {
+		options.Context = context.TODO()
+	}
+
+	req := &pb.ListRequest{Options: &pb.Options{Domain: options.Domain}}
+	rsp, err := s.client.ListServices(options.Context, req, s.callOpts()...)
 	if err != nil {
 		return nil, err
 	}
@@ -115,9 +160,12 @@ func (s *serviceRegistry) Watch(opts ...registry.WatchOption) (registry.Watcher,
 	for _, o := range opts {
 		o(&options)
 	}
+	if options.Context == nil {
+		options.Context = context.TODO()
+	}
 
-	stream, err := s.client.Watch(context.TODO(), &pb.WatchRequest{
-		Service: options.Service,
+	stream, err := s.client.Watch(options.Context, &pb.WatchRequest{
+		Service: options.Service, Options: &pb.Options{Domain: options.Domain},
 	}, s.callOpts()...)
 
 	if err != nil {
@@ -128,7 +176,7 @@ func (s *serviceRegistry) Watch(opts ...registry.WatchOption) (registry.Watcher,
 }
 
 func (s *serviceRegistry) String() string {
-	return s.name
+	return "service"
 }
 
 // NewRegistry returns a new registry service client
@@ -140,21 +188,23 @@ func NewRegistry(opts ...registry.Option) registry.Registry {
 
 	// the registry address
 	addrs := options.Addrs
-
 	if len(addrs) == 0 {
 		addrs = []string{"127.0.0.1:8000"}
 	}
 
-	// use mdns as a fall back in case its used
-	mReg := registry.NewRegistry()
+	if options.Context == nil {
+		options.Context = context.TODO()
+	}
 
-	// create new client with mdns
-	cli := client.NewClient(
-		client.Registry(mReg),
-	)
+	// extract the client from the context, fallback to grpc
+	var cli client.Client
+	if c, ok := options.Context.Value(clientKey{}).(client.Client); ok {
+		cli = c
+	} else {
+		cli = grpc.NewClient()
+	}
 
-	// service name
-	// TODO: accept option
+	// service name. TODO: accept option
 	name := DefaultService
 
 	return &serviceRegistry{

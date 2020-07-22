@@ -2,8 +2,8 @@
 package event
 
 import (
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"path"
 	"regexp"
@@ -11,13 +11,18 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/micro/go-micro/api/handler"
-	proto "github.com/micro/go-micro/api/proto"
-	"github.com/micro/go-micro/util/ctx"
+	"github.com/micro/go-micro/v2/api/handler"
+	proto "github.com/micro/go-micro/v2/api/proto"
+	"github.com/micro/go-micro/v2/util/ctx"
+	"github.com/oxtoacart/bpool"
+)
+
+var (
+	bufferPool = bpool.NewSizedBufferPool(1024, 8)
 )
 
 type event struct {
-	options handler.Options
+	opts handler.Options
 }
 
 var (
@@ -63,11 +68,18 @@ func evRoute(ns, p string) (string, string) {
 }
 
 func (e *event) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	bsize := handler.DefaultMaxRecvSize
+	if e.opts.MaxRecvSize > 0 {
+		bsize = e.opts.MaxRecvSize
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, bsize)
+
 	// request to topic:event
 	// create event
 	// publish to topic
 
-	topic, action := evRoute(e.options.Namespace, r.URL.Path)
+	topic, action := evRoute(e.opts.Namespace, r.URL.Path)
 
 	// create event
 	ev := &proto.Event{
@@ -91,15 +103,22 @@ func (e *event) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// set body
-	b, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
+	if r.Method == "GET" {
+		bytes, _ := json.Marshal(r.URL.Query())
+		ev.Data = string(bytes)
+	} else {
+		// Read body
+		buf := bufferPool.Get()
+		defer bufferPool.Put(buf)
+		if _, err := buf.ReadFrom(r.Body); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		ev.Data = buf.String()
 	}
-	ev.Data = string(b)
 
 	// get client
-	c := e.options.Service.Client()
+	c := e.opts.Client
 
 	// create publication
 	p := c.NewMessage(topic, ev)
@@ -117,6 +136,6 @@ func (e *event) String() string {
 
 func NewHandler(opts ...handler.Option) handler.Handler {
 	return &event{
-		options: handler.NewOptions(opts...),
+		opts: handler.NewOptions(opts...),
 	}
 }

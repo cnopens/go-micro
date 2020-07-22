@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/micro/go-micro/util/log"
+	"github.com/micro/go-micro/v2/logger"
 )
 
 var (
@@ -19,6 +19,8 @@ var (
 // table is an in-memory routing table
 type table struct {
 	sync.RWMutex
+	// fetchRoutes for a service
+	fetchRoutes func(string) error
 	// routes stores service routes
 	routes map[string]map[uint64]Route
 	// watchers stores table watchers
@@ -26,10 +28,11 @@ type table struct {
 }
 
 // newtable creates a new routing table and returns it
-func newTable(opts ...Option) *table {
+func newTable(fetchRoutes func(string) error, opts ...Option) *table {
 	return &table{
-		routes:   make(map[string]map[uint64]Route),
-		watchers: make(map[string]*tableWatcher),
+		fetchRoutes: fetchRoutes,
+		routes:      make(map[string]map[uint64]Route),
+		watchers:    make(map[string]*tableWatcher),
 	}
 }
 
@@ -38,10 +41,16 @@ func (t *table) sendEvent(e *Event) {
 	t.RLock()
 	defer t.RUnlock()
 
+	if len(e.Id) == 0 {
+		e.Id = uuid.New().String()
+	}
+
 	for _, w := range t.watchers {
 		select {
 		case w.resChan <- e:
 		case <-w.done:
+		// don't block forever
+		case <-time.After(time.Second):
 		}
 	}
 }
@@ -62,7 +71,9 @@ func (t *table) Create(r Route) error {
 	// add new route to the table for the route destination
 	if _, ok := t.routes[service][sum]; !ok {
 		t.routes[service][sum] = r
-		log.Debugf("Router emitting %s for route: %s", Create, r.Address)
+		if logger.V(logger.DebugLevel, logger.DefaultLogger) {
+			logger.Debugf("Router emitting %s for route: %s", Create, r.Address)
+		}
 		go t.sendEvent(&Event{Type: Create, Timestamp: time.Now(), Route: r})
 		return nil
 	}
@@ -87,7 +98,12 @@ func (t *table) Delete(r Route) error {
 	}
 
 	delete(t.routes[service], sum)
-	log.Debugf("Router emitting %s for route: %s", Delete, r.Address)
+	if len(t.routes[service]) == 0 {
+		delete(t.routes, service)
+	}
+	if logger.V(logger.DebugLevel, logger.DefaultLogger) {
+		logger.Debugf("Router emitting %s for route: %s", Delete, r.Address)
+	}
 	go t.sendEvent(&Event{Type: Delete, Timestamp: time.Now(), Route: r})
 
 	return nil
@@ -108,7 +124,9 @@ func (t *table) Update(r Route) error {
 
 	if _, ok := t.routes[service][sum]; !ok {
 		t.routes[service][sum] = r
-		log.Debugf("Router emitting %s for route: %s", Update, r.Address)
+		if logger.V(logger.DebugLevel, logger.DefaultLogger) {
+			logger.Debugf("Router emitting %s for route: %s", Update, r.Address)
+		}
 		go t.sendEvent(&Event{Type: Update, Timestamp: time.Now(), Route: r})
 		return nil
 	}
@@ -135,10 +153,10 @@ func (t *table) List() ([]Route, error) {
 }
 
 // isMatch checks if the route matches given query options
-func isMatch(route Route, address, gateway, network, router string) bool {
+func isMatch(route Route, address, gateway, network, router string, strategy Strategy) bool {
 	// matches the values provided
 	match := func(a, b string) bool {
-		if a == "*" || a == b {
+		if a == "*" || b == "*" || a == b {
 			return true
 		}
 		return false
@@ -150,12 +168,20 @@ func isMatch(route Route, address, gateway, network, router string) bool {
 		b string
 	}
 
+	// by default assume we are querying all routes
+	link := "*"
+	// if AdvertiseLocal change the link query accordingly
+	if strategy == AdvertiseLocal {
+		link = "local"
+	}
+
 	// compare the following values
 	values := []compare{
 		{gateway, route.Gateway},
 		{network, route.Network},
 		{router, route.Router},
 		{address, route.Address},
+		{link, route.Link},
 	}
 
 	for _, v := range values {
@@ -169,36 +195,100 @@ func isMatch(route Route, address, gateway, network, router string) bool {
 }
 
 // findRoutes finds all the routes for given network and router and returns them
-func findRoutes(routes map[uint64]Route, address, gateway, network, router string) []Route {
-	var results []Route
+func findRoutes(routes map[uint64]Route, address, gateway, network, router string, strategy Strategy) []Route {
+	// routeMap stores the routes we're going to advertise
+	routeMap := make(map[string][]Route)
+
 	for _, route := range routes {
-		if isMatch(route, address, gateway, network, router) {
-			results = append(results, route)
+		if isMatch(route, address, gateway, network, router, strategy) {
+			// add matchihg route to the routeMap
+			routeKey := route.Service + "@" + route.Network
+			// append the first found route to routeMap
+			_, ok := routeMap[routeKey]
+			if !ok {
+				routeMap[routeKey] = append(routeMap[routeKey], route)
+				continue
+			}
+
+			// if AdvertiseAll, keep appending
+			if strategy == AdvertiseAll || strategy == AdvertiseLocal {
+				routeMap[routeKey] = append(routeMap[routeKey], route)
+				continue
+			}
+
+			// now we're going to find the best routes
+			if strategy == AdvertiseBest {
+				// if the current optimal route metric is higher than routing table route, replace it
+				if len(routeMap[routeKey]) > 0 {
+					// NOTE: we know that when AdvertiseBest is set, we only ever have one item in current
+					if routeMap[routeKey][0].Metric > route.Metric {
+						routeMap[routeKey][0] = route
+						continue
+					}
+				}
+			}
 		}
 	}
+
+	var results []Route
+	for _, route := range routeMap {
+		results = append(results, route...)
+	}
+
 	return results
 }
 
 // Lookup queries routing table and returns all routes that match the lookup query
 func (t *table) Query(q ...QueryOption) ([]Route, error) {
-	t.RLock()
-	defer t.RUnlock()
-
 	// create new query options
 	opts := NewQuery(q...)
 
-	if opts.Service != "*" {
-		if _, ok := t.routes[opts.Service]; !ok {
-			return nil, ErrRouteNotFound
-		}
-		return findRoutes(t.routes[opts.Service], opts.Address, opts.Gateway, opts.Network, opts.Router), nil
+	// create a cwslicelist of query results
+	results := make([]Route, 0, len(t.routes))
+
+	// if No routes are queried, return early
+	if opts.Strategy == AdvertiseNone {
+		return results, nil
 	}
 
-	results := make([]Route, 0, len(t.routes))
-	// search through all destinations
-	for _, routes := range t.routes {
-		results = append(results, findRoutes(routes, opts.Address, opts.Gateway, opts.Network, opts.Router)...)
+	// readAndFilter routes for this service under read lock.
+	readAndFilter := func() ([]Route, bool) {
+		t.RLock()
+		defer t.RUnlock()
+
+		routes, ok := t.routes[opts.Service]
+		if !ok || len(routes) == 0 {
+			return nil, false
+		}
+
+		return findRoutes(routes, opts.Address, opts.Gateway, opts.Network, opts.Router, opts.Strategy), true
 	}
+
+	if opts.Service != "*" {
+		// try and load services from the cache
+		if routes, ok := readAndFilter(); ok {
+			return routes, nil
+		}
+
+		// load the cache and try again
+		if err := t.fetchRoutes(opts.Service); err != nil {
+			return nil, err
+		}
+
+		// try again
+		if routes, ok := readAndFilter(); ok {
+			return routes, nil
+		}
+
+		return nil, ErrRouteNotFound
+	}
+
+	// search through all destinations
+	t.RLock()
+	for _, routes := range t.routes {
+		results = append(results, findRoutes(routes, opts.Address, opts.Gateway, opts.Network, opts.Router, opts.Strategy)...)
+	}
+	t.RUnlock()
 
 	return results, nil
 }

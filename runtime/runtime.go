@@ -1,40 +1,63 @@
 // Package runtime is a service runtime manager
 package runtime
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 var (
 	// DefaultRuntime is default micro runtime
 	DefaultRuntime Runtime = NewRuntime()
+	// DefaultName is default runtime service name
+	DefaultName = "go.micro.runtime"
+
+	ErrAlreadyExists = errors.New("already exists")
 )
 
 // Runtime is a service runtime manager
 type Runtime interface {
 	// Init initializes runtime
 	Init(...Option) error
-	// Registers a service
+	// Create registers a service
 	Create(*Service, ...CreateOption) error
-	// Remove a service
-	Delete(*Service) error
+	// Read returns the service
+	Read(...ReadOption) ([]*Service, error)
 	// Update the service in place
-	Update(*Service) error
-	// List the managed services
-	List() ([]*Service, error)
-	// starts the runtime
+	Update(*Service, ...UpdateOption) error
+	// Remove a service
+	Delete(*Service, ...DeleteOption) error
+	// Logs returns the logs for a service
+	Logs(*Service, ...LogsOption) (LogStream, error)
+	// Start starts the runtime
 	Start() error
-	// Shutdown the runtime
+	// Stop shuts down the runtime
+	Stop() error
+	// String describes runtime
+	String() string
+}
+
+// Stream returns a log stream
+type LogStream interface {
+	Error() error
+	Chan() chan LogRecord
 	Stop() error
 }
 
-// Notifier is an update notifier
-type Notifier interface {
-	// Notify publishes notification events
+type LogRecord struct {
+	Message  string
+	Metadata map[string]string
+}
+
+// Scheduler is a runtime service scheduler
+type Scheduler interface {
+	// Notify publishes schedule events
 	Notify() (<-chan Event, error)
-	// Close stops the notifier
+	// Close stops the scheduler
 	Close() error
 }
 
-// EventType defines notification event
+// EventType defines schedule event
 type EventType int
 
 const (
@@ -62,26 +85,26 @@ func (t EventType) String() string {
 
 // Event is notification event
 type Event struct {
+	// ID of the event
+	ID string
 	// Type is event type
 	Type EventType
 	// Timestamp is event timestamp
 	Timestamp time.Time
-	// Service is the name of the service
-	Service string
-	// Version of the build
-	Version string
+	// Service the event relates to
+	Service *Service
+	// Options to use when processing the event
+	Options *CreateOptions
 }
 
 // Service is runtime service
 type Service struct {
 	// Name of the service
 	Name string
-	// url location of source
-	Source string
-	// Path to store source
-	Path string
-	// Exec command
-	Exec string
 	// Version of the service
 	Version string
+	// url location of source
+	Source string
+	// Metadata stores metadata
+	Metadata map[string]string
 }

@@ -1,9 +1,13 @@
 package router
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func testSetup() (*table, Route) {
-	table := newTable()
+	router := newRouter().(*router)
+	table := router.table
 
 	route := Route{
 		Service: "dest.svc",
@@ -108,10 +112,10 @@ func TestList(t *testing.T) {
 func TestQuery(t *testing.T) {
 	table, route := testSetup()
 
-	svc := []string{"svc1", "svc2", "svc3"}
-	net := []string{"net1", "net2", "net1"}
-	gw := []string{"gw1", "gw2", "gw3"}
-	rtr := []string{"rtr1", "rt2", "rt3"}
+	svc := []string{"svc1", "svc2", "svc3", "svc1"}
+	net := []string{"net1", "net2", "net1", "net3"}
+	gw := []string{"gw1", "gw2", "gw3", "gw3"}
+	rtr := []string{"rtr1", "rt2", "rt3", "rtr3"}
 
 	for i := 0; i < len(svc); i++ {
 		route.Service = svc[i]
@@ -127,6 +131,8 @@ func TestQuery(t *testing.T) {
 	routes, err := table.Query()
 	if err != nil {
 		t.Errorf("error looking up routes: %s", err)
+	} else if len(routes) == 0 {
+		t.Errorf("error looking up routes: not found")
 	}
 
 	// query routes particular network
@@ -216,4 +222,127 @@ func TestQuery(t *testing.T) {
 	if len(routes) != 0 {
 		t.Errorf("incorrect number of routes returned. Expected: %d, found: %d", 0, len(routes))
 	}
+
+	// query NO routes
+	query = []QueryOption{
+		QueryGateway(gateway),
+		QueryNetwork(network),
+		QueryStrategy(AdvertiseNone),
+	}
+
+	routes, err = table.Query(query...)
+	if err != nil {
+		t.Errorf("error looking up routes: %s", err)
+	}
+
+	if len(routes) > 0 {
+		t.Errorf("incorrect number of routes returned. Expected: %d, found: %d", 0, len(routes))
+	}
+
+	// insert local routes to query
+	for i := 0; i < 2; i++ {
+		route.Link = "local"
+		route.Address = fmt.Sprintf("local.route.address-%d", i)
+		if err := table.Create(route); err != nil {
+			t.Errorf("error adding route: %s", err)
+		}
+	}
+
+	// query local routes
+	query = []QueryOption{
+		QueryGateway("*"),
+		QueryNetwork("*"),
+		QueryStrategy(AdvertiseLocal),
+	}
+
+	routes, err = table.Query(query...)
+	if err != nil {
+		t.Errorf("error looking up routes: %s", err)
+	}
+
+	if len(routes) != 2 {
+		t.Errorf("incorrect number of routes returned. Expected: %d, found: %d", 2, len(routes))
+	}
+
+	// add two different routes for svcX with different metric
+	for i := 0; i < 2; i++ {
+		route.Service = "svcX"
+		route.Address = fmt.Sprintf("svcX.route.address-%d", i)
+		route.Metric = int64(100 + i)
+		if err := table.Create(route); err != nil {
+			t.Errorf("error adding route: %s", err)
+		}
+	}
+
+	// query best routes for svcX
+	query = []QueryOption{
+		QueryService("svcX"),
+		QueryStrategy(AdvertiseBest),
+	}
+
+	routes, err = table.Query(query...)
+	if err != nil {
+		t.Errorf("error looking up routes: %s", err)
+	}
+
+	if len(routes) != 1 {
+		t.Errorf("incorrect number of routes returned. Expected: %d, found: %d", 1, len(routes))
+	}
+}
+
+func TestFallback(t *testing.T) {
+
+	r := &router{
+		subscribers: make(map[string]chan *Advert),
+		options:     DefaultOptions(),
+	}
+	route := Route{
+		Service: "go.micro.service.foo",
+		Router:  r.options.Id,
+		Link:    DefaultLink,
+		Metric:  DefaultLocalMetric,
+	}
+	r.table = newTable(func(s string) error {
+		r.table.Create(route)
+		return nil
+	})
+	r.start()
+
+	rts, err := r.Lookup(QueryService("go.micro.service.foo"))
+	if err != nil {
+		t.Errorf("error looking up service %s", err)
+	}
+	if len(rts) != 1 {
+		t.Errorf("incorrect number of routes returned %d", len(rts))
+	}
+
+	// deleting from the table but the next query should invoke the fallback that we passed during new table creation
+	if err := r.table.Delete(route); err != nil {
+		t.Errorf("error deleting route %s", err)
+	}
+
+	rts, err = r.Lookup(QueryService("go.micro.service.foo"))
+	if err != nil {
+		t.Errorf("error looking up service %s", err)
+	}
+	if len(rts) != 1 {
+		t.Errorf("incorrect number of routes returned %d", len(rts))
+	}
+
+}
+
+func TestFallbackError(t *testing.T) {
+	r := &router{
+		subscribers: make(map[string]chan *Advert),
+		options:     DefaultOptions(),
+	}
+	r.table = newTable(func(s string) error {
+		return fmt.Errorf("ERROR")
+	})
+	r.start()
+	_, err := r.Lookup(QueryService("go.micro.service.foo"))
+	if err == nil {
+		t.Errorf("expected error looking up service but none returned")
+	}
+
 }

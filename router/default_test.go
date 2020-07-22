@@ -2,12 +2,12 @@ package router
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/micro/go-micro/registry/memory"
-	"github.com/micro/go-micro/util/log"
+	"github.com/micro/go-micro/v2/registry/memory"
 )
 
 func routerTestSetup() Router {
@@ -15,23 +15,20 @@ func routerTestSetup() Router {
 	return newRouter(Registry(r))
 }
 
-func TestRouterStartStop(t *testing.T) {
+func TestRouterClose(t *testing.T) {
 	r := routerTestSetup()
-
-	log.Debugf("TestRouterStartStop STARTING")
-	if err := r.Start(); err != nil {
-		t.Errorf("failed to start router: %v", err)
-	}
 
 	_, err := r.Advertise()
 	if err != nil {
 		t.Errorf("failed to start advertising: %v", err)
 	}
 
-	if err := r.Stop(); err != nil {
+	if err := r.Close(); err != nil {
 		t.Errorf("failed to stop router: %v", err)
 	}
-	log.Debugf("TestRouterStartStop STOPPED")
+	if len(os.Getenv("IN_TRAVIS_CI")) == 0 {
+		t.Logf("TestRouterStartStop STOPPED")
+	}
 }
 
 func TestRouterAdvertise(t *testing.T) {
@@ -39,11 +36,6 @@ func TestRouterAdvertise(t *testing.T) {
 
 	// lower the advertise interval
 	AdvertiseEventsTick = 500 * time.Millisecond
-	AdvertiseTableTick = 1 * time.Second
-
-	if err := r.Start(); err != nil {
-		t.Errorf("failed to start router: %v", err)
-	}
 
 	ch, err := r.Advertise()
 	if err != nil {
@@ -52,7 +44,9 @@ func TestRouterAdvertise(t *testing.T) {
 
 	// receive announce event
 	ann := <-ch
-	log.Debugf("received announce advert: %v", ann)
+	if len(os.Getenv("IN_TRAVIS_CI")) == 0 {
+		t.Logf("received announce advert: %v", ann)
+	}
 
 	// Generate random unique routes
 	nrRoutes := 5
@@ -63,7 +57,7 @@ func TestRouterAdvertise(t *testing.T) {
 		Gateway: "dest.gw",
 		Network: "dest.network",
 		Router:  "src.router",
-		Link:    "det.link",
+		Link:    "local",
 		Metric:  10,
 	}
 
@@ -75,16 +69,22 @@ func TestRouterAdvertise(t *testing.T) {
 
 	var advertErr error
 
+	createDone := make(chan bool)
 	errChan := make(chan error)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		wg.Done()
+		defer close(createDone)
 		for _, route := range routes {
-			log.Debugf("Creating route %v", route)
+			if len(os.Getenv("IN_TRAVIS_CI")) == 0 {
+				t.Logf("Creating route %v", route)
+			}
 			if err := r.Table().Create(route); err != nil {
-				log.Debugf("Failed to create route: %v", err)
+				if len(os.Getenv("IN_TRAVIS_CI")) == 0 {
+					t.Logf("Failed to create route: %v", err)
+				}
 				errChan <- err
 				return
 			}
@@ -92,13 +92,13 @@ func TestRouterAdvertise(t *testing.T) {
 	}()
 
 	var adverts int
-	doneChan := make(chan bool)
+	readDone := make(chan bool)
 
 	wg.Add(1)
 	go func() {
 		defer func() {
 			wg.Done()
-			doneChan <- true
+			readDone <- true
 		}()
 		for advert := range ch {
 			select {
@@ -106,14 +106,19 @@ func TestRouterAdvertise(t *testing.T) {
 				t.Errorf("failed advertising events: %v", advertErr)
 			default:
 				// do nothing for now
-				log.Debugf("Router advert received: %v", advert)
+				if len(os.Getenv("IN_TRAVIS_CI")) == 0 {
+					t.Logf("Router advert received: %v", advert)
+				}
 				adverts += len(advert.Events)
 			}
 			return
 		}
 	}()
 
-	<-doneChan
+	// done adding routes to routing table
+	<-createDone
+	// done reading adverts from the routing table
+	<-readDone
 
 	if adverts != nrRoutes {
 		t.Errorf("Expected %d adverts, received: %d", nrRoutes, adverts)
@@ -121,7 +126,7 @@ func TestRouterAdvertise(t *testing.T) {
 
 	wg.Wait()
 
-	if err := r.Stop(); err != nil {
+	if err := r.Close(); err != nil {
 		t.Errorf("failed to stop router: %v", err)
 	}
 }

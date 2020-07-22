@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/micro/go-micro/config/source"
+	"github.com/micro/go-micro/v2/config/source"
 )
 
 type memory struct {
@@ -39,6 +39,11 @@ func (s *memory) Watch() (source.Watcher, error) {
 	s.Watchers[w.Id] = w
 	s.Unlock()
 	return w, nil
+}
+
+func (m *memory) Write(cs *source.ChangeSet) error {
+	m.Update(cs)
+	return nil
 }
 
 // Update allows manual updates of the config data.

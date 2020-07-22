@@ -2,15 +2,16 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 
-	"github.com/micro/go-micro/client"
-	"github.com/micro/go-micro/router"
-	pb "github.com/micro/go-micro/router/proto"
+	"github.com/micro/go-micro/v2/client"
+	"github.com/micro/go-micro/v2/errors"
+	"github.com/micro/go-micro/v2/router"
+	pb "github.com/micro/go-micro/v2/router/service/proto"
 )
 
 type svc struct {
@@ -19,7 +20,6 @@ type svc struct {
 	callOpts   []client.CallOption
 	router     pb.RouterService
 	table      *table
-	status     *router.Status
 	exit       chan bool
 	errChan    chan error
 	advertChan chan *router.Advert
@@ -38,21 +38,15 @@ func NewRouter(opts ...router.Option) router.Router {
 	// NOTE: might need some client opts here
 	cli := client.DefaultClient
 
-	// set options client
-	if options.Client != nil {
-		cli = options.Client
-	}
-
-	// set the status to Stopped
-	status := &router.Status{
-		Code:  router.Stopped,
-		Error: nil,
+	// get options client from the context. We set this in the context to prevent an import loop, as
+	// the client depends on the router
+	if c, ok := options.Context.Value(clientKey{}).(client.Client); ok {
+		cli = c
 	}
 
 	// NOTE: should we have Client/Service option in router.Options?
 	s := &svc{
 		opts:   options,
-		status: status,
 		router: pb.NewRouterService(router.DefaultName, cli),
 	}
 
@@ -94,19 +88,6 @@ func (s *svc) Table() router.Table {
 	return s.table
 }
 
-// Start starts the service
-func (s *svc) Start() error {
-	s.Lock()
-	defer s.Unlock()
-
-	s.status = &router.Status{
-		Code:  router.Running,
-		Error: nil,
-	}
-
-	return nil
-}
-
 func (s *svc) advertiseEvents(advertChan chan *router.Advert, stream pb.Router_AdvertiseService) error {
 	go func() {
 		<-s.exit
@@ -127,15 +108,17 @@ func (s *svc) advertiseEvents(advertChan chan *router.Advert, stream pb.Router_A
 		events := make([]*router.Event, len(resp.Events))
 		for i, event := range resp.Events {
 			route := router.Route{
-				Service: event.Route.Service,
-				Address: event.Route.Address,
-				Gateway: event.Route.Gateway,
-				Network: event.Route.Network,
-				Link:    event.Route.Link,
-				Metric:  event.Route.Metric,
+				Service:  event.Route.Service,
+				Address:  event.Route.Address,
+				Gateway:  event.Route.Gateway,
+				Network:  event.Route.Network,
+				Link:     event.Route.Link,
+				Metric:   event.Route.Metric,
+				Metadata: event.Route.Metadata,
 			}
 
 			events[i] = &router.Event{
+				Id:        event.Id,
 				Type:      router.EventType(event.Type),
 				Timestamp: time.Unix(0, event.Timestamp),
 				Route:     route,
@@ -169,21 +152,16 @@ func (s *svc) Advertise() (<-chan *router.Advert, error) {
 	s.Lock()
 	defer s.Unlock()
 
-	switch s.status.Code {
-	case router.Running, router.Advertising:
-		stream, err := s.router.Advertise(context.Background(), &pb.Request{}, s.callOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed getting advert stream: %s", err)
-		}
-		// create advertise and event channels
-		advertChan := make(chan *router.Advert)
-		go s.advertiseEvents(advertChan, stream)
-		return advertChan, nil
-	case router.Stopped:
-		return nil, fmt.Errorf("not running")
+	stream, err := s.router.Advertise(context.Background(), &pb.Request{}, s.callOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed getting advert stream: %s", err)
 	}
 
-	return nil, fmt.Errorf("error: %s", s.status.Error)
+	// create advertise and event channels
+	advertChan := make(chan *router.Advert)
+	go s.advertiseEvents(advertChan, stream)
+
+	return advertChan, nil
 }
 
 // Process processes incoming adverts
@@ -191,14 +169,16 @@ func (s *svc) Process(advert *router.Advert) error {
 	events := make([]*pb.Event, 0, len(advert.Events))
 	for _, event := range advert.Events {
 		route := &pb.Route{
-			Service: event.Route.Service,
-			Address: event.Route.Address,
-			Gateway: event.Route.Gateway,
-			Network: event.Route.Network,
-			Link:    event.Route.Link,
-			Metric:  event.Route.Metric,
+			Service:  event.Route.Service,
+			Address:  event.Route.Address,
+			Gateway:  event.Route.Gateway,
+			Network:  event.Route.Network,
+			Link:     event.Route.Link,
+			Metric:   event.Route.Metric,
+			Metadata: event.Route.Metadata,
 		}
 		e := &pb.Event{
+			Id:        event.Id,
 			Type:      pb.EventType(event.Type),
 			Timestamp: event.Timestamp.UnixNano(),
 			Route:     route,
@@ -220,93 +200,8 @@ func (s *svc) Process(advert *router.Advert) error {
 	return nil
 }
 
-// Solicit advertise all routes
-func (s *svc) Solicit() error {
-	// list all the routes
-	routes, err := s.table.List()
-	if err != nil {
-		return err
-	}
-
-	// build events to advertise
-	events := make([]*router.Event, len(routes))
-	for i := range events {
-		events[i] = &router.Event{
-			Type:      router.Update,
-			Timestamp: time.Now(),
-			Route:     routes[i],
-		}
-	}
-
-	advert := &router.Advert{
-		Id:        s.opts.Id,
-		Type:      router.RouteUpdate,
-		Timestamp: time.Now(),
-		TTL:       time.Duration(router.DefaultAdvertTTL),
-		Events:    events,
-	}
-
-	select {
-	case s.advertChan <- advert:
-	case <-s.exit:
-		close(s.advertChan)
-		return nil
-	}
-
-	return nil
-}
-
-// Status returns router status
-func (s *svc) Status() router.Status {
-	s.Lock()
-	defer s.Unlock()
-
-	// check if its stopped
-	select {
-	case <-s.exit:
-		return router.Status{
-			Code:  router.Stopped,
-			Error: nil,
-		}
-	default:
-		// don't block
-	}
-
-	// check the remote router
-	rsp, err := s.router.Status(context.Background(), &pb.Request{}, s.callOpts...)
-	if err != nil {
-		return router.Status{
-			Code:  router.Error,
-			Error: err,
-		}
-	}
-
-	code := router.Running
-	var serr error
-
-	switch rsp.Status.Code {
-	case "running":
-		code = router.Running
-	case "advertising":
-		code = router.Advertising
-	case "stopped":
-		code = router.Stopped
-	case "error":
-		code = router.Error
-	}
-
-	if len(rsp.Status.Error) > 0 {
-		serr = errors.New(rsp.Status.Error)
-	}
-
-	return router.Status{
-		Code:  code,
-		Error: serr,
-	}
-}
-
-// Remote router cannot be stopped
-func (s *svc) Stop() error {
+// Remote router cannot be closed
+func (s *svc) Close() error {
 	s.Lock()
 	defer s.Unlock()
 
@@ -333,20 +228,22 @@ func (s *svc) Lookup(q ...router.QueryOption) ([]router.Route, error) {
 		},
 	}, s.callOpts...)
 
-	// errored out
-	if err != nil {
+	if verr, ok := err.(*errors.Error); ok && verr.Code == http.StatusNotFound {
+		return nil, router.ErrRouteNotFound
+	} else if err != nil {
 		return nil, err
 	}
 
 	routes := make([]router.Route, len(resp.Routes))
 	for i, route := range resp.Routes {
 		routes[i] = router.Route{
-			Service: route.Service,
-			Address: route.Address,
-			Gateway: route.Gateway,
-			Network: route.Network,
-			Link:    route.Link,
-			Metric:  route.Metric,
+			Service:  route.Service,
+			Address:  route.Address,
+			Gateway:  route.Gateway,
+			Network:  route.Network,
+			Link:     route.Link,
+			Metric:   route.Metric,
+			Metadata: route.Metadata,
 		}
 	}
 

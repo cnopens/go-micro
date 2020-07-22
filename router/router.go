@@ -7,11 +7,11 @@ import (
 
 var (
 	// DefaultAddress is default router address
-	DefaultAddress = ":9093"
+	DefaultAddress = ":8084"
 	// DefaultName is default router service name
 	DefaultName = "go.micro.router"
 	// DefaultNetwork is default micro network
-	DefaultNetwork = "go.micro"
+	DefaultNetwork = "micro"
 	// DefaultRouter is default network router
 	DefaultRouter = NewRouter()
 )
@@ -24,22 +24,16 @@ type Router interface {
 	Options() Options
 	// The routing table
 	Table() Table
-	// Advertise advertises routes to the network
+	// Advertise advertises routes
 	Advertise() (<-chan *Advert, error)
 	// Process processes incoming adverts
 	Process(*Advert) error
-	// Solicit advertises the whole routing table to the network
-	Solicit() error
 	// Lookup queries routes in the routing table
 	Lookup(...QueryOption) ([]Route, error)
 	// Watch returns a watcher which tracks updates to the routing table
 	Watch(opts ...WatchOption) (Watcher, error)
-	// Start starts the router
-	Start() error
-	// Status returns router status
-	Status() Status
-	// Stop stops the router
-	Stop() error
+	// Close the router
+	Close() error
 	// Returns the router implementation
 	String() string
 }
@@ -74,34 +68,6 @@ const (
 	// Error means the router has encountered error
 	Error
 )
-
-func (s StatusCode) String() string {
-	switch s {
-	case Running:
-		return "running"
-	case Advertising:
-		return "advertising"
-	case Stopped:
-		return "stopped"
-	case Error:
-		return "error"
-	default:
-		return "unknown"
-	}
-}
-
-// Status is router status
-type Status struct {
-	// Code defines router status
-	Code StatusCode
-	// Error contains error description
-	Error error
-}
-
-// String returns human readable status
-func (s Status) String() string {
-	return s.Code.String()
-}
 
 // AdvertType is route advertisement type
 type AdvertType int
@@ -142,6 +108,7 @@ type Advert struct {
 // Strategy is route advertisement strategy
 type Strategy int
 
+// TODO: remove the "Advertise" prefix from these
 const (
 	// AdvertiseAll advertises all routes to the network
 	AdvertiseAll Strategy = iota

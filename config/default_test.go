@@ -4,16 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/micro/go-micro/config/source/env"
-	"github.com/micro/go-micro/config/source/file"
-)
-
-var (
-	sep = string(os.PathSeparator)
+	"github.com/micro/go-micro/v2/config/source"
+	"github.com/micro/go-micro/v2/config/source/env"
+	"github.com/micro/go-micro/v2/config/source/file"
+	"github.com/micro/go-micro/v2/config/source/memory"
 )
 
 func createFileForIssue18(t *testing.T, content string) *os.File {
@@ -55,7 +54,10 @@ func TestConfigLoadWithGoodFile(t *testing.T) {
 	}()
 
 	// Create new config
-	conf := NewConfig()
+	conf, err := NewConfig()
+	if err != nil {
+		t.Fatalf("Expected no error but got %v", err)
+	}
 	// Load file source
 	if err := conf.Load(file.NewSource(
 		file.WithPath(path),
@@ -73,9 +75,12 @@ func TestConfigLoadWithInvalidFile(t *testing.T) {
 	}()
 
 	// Create new config
-	conf := NewConfig()
+	conf, err := NewConfig()
+	if err != nil {
+		t.Fatalf("Expected no error but got %v", err)
+	}
 	// Load file source
-	err := conf.Load(file.NewSource(
+	err = conf.Load(file.NewSource(
 		file.WithPath(path),
 		file.WithPath("/i/do/not/exists.json"),
 	))
@@ -105,18 +110,57 @@ func TestConfigMerge(t *testing.T) {
 	}()
 	os.Setenv("AMQP_HOST", "rabbit.testing.com")
 
-	conf := NewConfig()
-	conf.Load(
+	conf, err := NewConfig()
+	if err != nil {
+		t.Fatalf("Expected no error but got %v", err)
+	}
+	if err := conf.Load(
 		file.NewSource(
 			file.WithPath(path),
 		),
 		env.NewSource(),
-	)
+	); err != nil {
+		t.Fatalf("Expected no error but got %v", err)
+	}
 
 	actualHost := conf.Get("amqp", "host").String("backup")
 	if actualHost != "rabbit.testing.com" {
 		t.Fatalf("Expected %v but got %v",
 			"rabbit.testing.com",
 			actualHost)
+	}
+}
+
+func equalS(t *testing.T, actual, expect string) {
+	if actual != expect {
+		t.Errorf("Expected %s but got %s", actual, expect)
+	}
+}
+
+func TestConfigWatcherDirtyOverrite(t *testing.T) {
+	n := runtime.GOMAXPROCS(0)
+	defer runtime.GOMAXPROCS(n)
+
+	runtime.GOMAXPROCS(1)
+
+	l := 100
+
+	ss := make([]source.Source, l, l)
+
+	for i := 0; i < l; i++ {
+		ss[i] = memory.NewSource(memory.WithJSON([]byte(fmt.Sprintf(`{"key%d": "val%d"}`, i, i))))
+	}
+
+	conf, _ := NewConfig()
+
+	for _, s := range ss {
+		_ = conf.Load(s)
+	}
+	runtime.Gosched()
+
+	for i, _ := range ss {
+		k := fmt.Sprintf("key%d", i)
+		v := fmt.Sprintf("val%d", i)
+		equalS(t, conf.Get(k).String(""), v)
 	}
 }

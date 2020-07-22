@@ -4,17 +4,19 @@ import (
 	"context"
 	"time"
 
-	"github.com/micro/go-micro/broker"
-	"github.com/micro/go-micro/client"
-	"github.com/micro/go-micro/registry"
-	"github.com/micro/go-micro/server"
-	"github.com/micro/go-micro/transport"
+	"github.com/micro/go-micro/v2/broker"
+	"github.com/micro/go-micro/v2/client"
+	"github.com/micro/go-micro/v2/model"
+	"github.com/micro/go-micro/v2/registry"
+	"github.com/micro/go-micro/v2/server"
+	"github.com/micro/go-micro/v2/transport"
 )
 
 type Options struct {
 	Broker    broker.Broker
 	Client    client.Client
 	Server    server.Server
+	Model     model.Model
 	Registry  registry.Registry
 	Transport transport.Transport
 
@@ -31,7 +33,7 @@ type Options struct {
 
 type Option func(*Options)
 
-func newOptions(opts ...Option) Options {
+func NewOptions(opts ...Option) Options {
 	opt := Options{
 		Broker:    broker.DefaultBroker,
 		Client:    client.DefaultClient,
@@ -72,9 +74,17 @@ func Context(ctx context.Context) Option {
 	}
 }
 
+// Server sets the server for handling requests
 func Server(s server.Server) Option {
 	return func(o *Options) {
 		o.Server = s
+	}
+}
+
+// Model sets the model for data access
+func Model(m model.Model) Option {
+	return func(o *Options) {
+		o.Model = m
 	}
 }
 
@@ -83,11 +93,12 @@ func Server(s server.Server) Option {
 func Registry(r registry.Registry) Option {
 	return func(o *Options) {
 		o.Registry = r
-		// Update Client and Server
-		o.Client.Init(client.Registry(r))
+		// Update server
 		o.Server.Init(server.Registry(r))
 		// Update Broker
 		o.Broker.Init(broker.Registry(r))
+		// Update router
+		o.Client.Init(client.Registry(r))
 	}
 }
 
